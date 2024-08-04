@@ -2,7 +2,11 @@ module github.com/0xpetersatoshi/blockchain-data-aggregator
 
 go 1.21.5
 
-require github.com/rs/zerolog v1.33.0
+require (
+	cloud.google.com/go/storage v1.43.0
+	github.com/rs/zerolog v1.33.0
+	github.com/spf13/pflag v1.0.5
+)
 
 require (
 	cloud.google.com/go v0.115.0 // indirect
@@ -10,7 +14,6 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.2 // indirect
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	cloud.google.com/go/iam v1.1.8 // indirect
-	cloud.google.com/go/storage v1.43.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.1 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

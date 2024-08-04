@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -56,7 +57,7 @@ type RawTransactionRecord struct {
 // NewRawTransactionRecord creates a new raw transaction struct
 func NewRawTransactionRecord(record []string) (*RawTransactionRecord, error) {
 	newRecord := &RawTransactionRecord{}
-	numRecordFields := reflect.TypeOf(newRecord).NumField()
+	numRecordFields := reflect.TypeOf(*newRecord).NumField()
 	numRawRecordFields := len(record)
 
 	if numRawRecordFields < numRecordFields {
@@ -92,14 +93,14 @@ func NewRawTransactionRecord(record []string) (*RawTransactionRecord, error) {
 
 // TransactionRecord defines the record for the transactions data
 type TransactionRecord struct {
-	Date                 time.Time
+	Date                 string
 	ProjectID            string
 	NumberOfTransactions int
 	TotalVolumeUSD       float64
 }
 
 // NewTransactionRecord creates a new TransactionRecord
-func NewTransactionRecord(date time.Time, projectID string, numberOfTransactions int, totalVolumeUSD float64) *TransactionRecord {
+func NewTransactionRecord(date string, projectID string, numberOfTransactions int, totalVolumeUSD float64) *TransactionRecord {
 	return &TransactionRecord{
 		Date:                 date,
 		ProjectID:            projectID,
@@ -127,17 +128,19 @@ func (t *TransactionRecord) DBRowEntry() []interface{} {
 type TransactionsProcessor struct {
 	context       context.Context
 	recordChan    chan<- Record
+	doneChan      chan<- bool
 	config        config.Processor
 	storageClient *storage.Client
 	storageConfig config.Storage
 	logger        zerolog.Logger
 }
 
-// NewTransactionsProcessor creates a new TransactionProcessor
-func NewTransactionsProcessor(ctx context.Context, recordChan chan<- Record, config config.Processor, storageClient *storage.Client, storageConfig config.Storage, logger zerolog.Logger) *TransactionsProcessor {
+// NewTransactionsProcessor creates a new TransactionsProcessor
+func NewTransactionsProcessor(ctx context.Context, recordChan chan<- Record, doneChan chan<- bool, config config.Processor, storageClient *storage.Client, storageConfig config.Storage, logger zerolog.Logger) *TransactionsProcessor {
 	return &TransactionsProcessor{
 		context:       ctx,
 		recordChan:    recordChan,
+		doneChan:      doneChan,
 		config:        config,
 		storageClient: storageClient,
 		storageConfig: storageConfig,
@@ -147,13 +150,31 @@ func NewTransactionsProcessor(ctx context.Context, recordChan chan<- Record, con
 
 // Process processes the transactions data
 func (t *TransactionsProcessor) Process() error {
+	if err := t.processCSV(); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (*TransactionRecord, error) {
 	// TODO: flatten and parse data into TransactionRecord
 	// TODO: convert token prices using coin gecko api data
-	return nil, nil
+
+	const layout = "2006-01-02 15:04:05.000"
+
+	transactionRecord := &TransactionRecord{}
+
+	ts, err := time.Parse(layout, record.Timestamp)
+	if err != nil {
+		return nil, err
+	}
+
+	transactionRecord.Date = ts.Format("2006-01-02")
+	transactionRecord.ProjectID = record.ProjectID
+	transactionRecord.NumberOfTransactions = 1
+	transactionRecord.TotalVolumeUSD = 0
+
+	return transactionRecord, nil
 }
 
 func (t *TransactionsProcessor) processCSV() error {
@@ -166,19 +187,27 @@ func (t *TransactionsProcessor) processCSV() error {
 	csvReader := csv.NewReader(reader)
 
 	// Skip header
-	if _, err := csvReader.Read(); err != nil {
+	header, err := csvReader.Read()
+	if err != nil {
 		return err
 	}
 
+	t.logger.Debug().Msgf("Header: %+v", header)
+
+	var count int
+	var wg sync.WaitGroup
+	defer close(t.doneChan)
 	// TODO: implement batch processing
 	for {
 		record, err := csvReader.Read()
 		if err == io.EOF {
+			t.logger.Debug().Msgf("Processed %d records", count)
 			break
 		}
 		if err != nil {
 			return err
 		}
+		t.logger.Debug().Msgf("Record: %+v", record)
 
 		newRawRecord, err := NewRawTransactionRecord(record)
 		if err != nil {
@@ -186,9 +215,35 @@ func (t *TransactionsProcessor) processCSV() error {
 		}
 
 		newTransactionRecord, err := t.processRawRecord(newRawRecord)
+		if err != nil {
+			return err
+		}
 
+		t.logger.Debug().Int("count", count).Msgf("TransactionRecord: %+v", newTransactionRecord)
+
+		if count%100 == 0 {
+			t.logger.Info().Msgf("processed %d records", count)
+			t.logger.Info().Msgf("latest record: %+v", newTransactionRecord)
+		}
+
+		count++
+		wg.Add(1)
 		// Put into channel
-		t.recordChan <- newTransactionRecord
+		go func(record *TransactionRecord) {
+			defer wg.Done()
+			for {
+				select {
+				case t.recordChan <- record:
+					t.logger.Debug().Int("count", count).Msgf("Record sent to channel: %+v", record)
+					return
+				default:
+					t.logger.Warn().Msg("recordChan is full")
+					time.Sleep(100 * time.Millisecond)
+				}
+			}
+		}(newTransactionRecord)
 	}
+	wg.Wait()
+	t.doneChan <- true
 	return nil
 }
