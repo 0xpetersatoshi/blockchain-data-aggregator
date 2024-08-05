@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -101,32 +100,65 @@ type TransactionRecord struct {
 
 // AggregatedTransactionRecord defines the aggregated record for the transactions data
 type AggregatedTransactionRecord struct {
-	Date                 string  `json:"date"`
-	ProjectID            string  `json:"project_id"`
-	NumberOfTransactions int     `json:"number_of_transactions"`
-	TotalVolumeUSD       float64 `json:"total_volume_usd"`
-}
-
-// TableName returns the table name
-func (t *AggregatedTransactionRecord) TableName() string {
-	return "transactions"
+	Date                 string  `json:"date" sql:"date"`
+	ProjectID            string  `json:"project_id" sql:"project_id"`
+	NumberOfTransactions int     `json:"number_of_transactions" sql:"number_of_transactions"`
+	TotalVolumeUSD       float64 `json:"total_volume_usd" sql:"total_volume_usd"`
 }
 
 // DBRowEntry returns the database row entry
 func (t *AggregatedTransactionRecord) DBRowEntry() []interface{} {
-	return []interface{}{
-		t.Date,
-		t.ProjectID,
-		t.NumberOfTransactions,
-		t.TotalVolumeUSD,
+	return utils.GetStructFields(t)
+}
+
+// Values returns the values
+func (t *AggregatedTransactionRecord) Values() string {
+	bs, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return ""
 	}
+	return string(bs)
+}
+
+// TransactionsBatch defines the record batch for the aggregated transactions data
+type TransactionsBatch struct {
+	records []*AggregatedTransactionRecord
+}
+
+// NewTransactionsBatch creates a new TransactionsTransporter
+func NewTransactionsBatch(records []*AggregatedTransactionRecord) *TransactionsBatch {
+	return &TransactionsBatch{
+		records: records,
+	}
+}
+
+// TableName returns the table name
+func (t *TransactionsBatch) TableName() string {
+	return "transactions"
+}
+
+// NumColumns returns the number of columns
+func (t *TransactionsBatch) NumColumns() int {
+	return reflect.TypeOf(*t).NumField()
+}
+
+// Columns returns the column names of the transactions record
+func (t *TransactionsBatch) Columns() []string {
+	return utils.GetStructFieldNames(t, "sql")
+}
+
+// Records returns the records
+func (t *TransactionsBatch) Records() []Record {
+	var records []Record
+	for _, r := range t.records {
+		records = append(records, r)
+	}
+	return records
 }
 
 // TransactionsProcessor defines the ETL processor for the transactions data
 type TransactionsProcessor struct {
 	context       context.Context
-	recordChan    chan<- Record
-	doneChan      chan<- bool
 	config        config.Processor
 	storageClient *storage.Client
 	storageConfig config.Storage
@@ -134,11 +166,9 @@ type TransactionsProcessor struct {
 }
 
 // NewTransactionsProcessor creates a new TransactionsProcessor
-func NewTransactionsProcessor(ctx context.Context, recordChan chan<- Record, doneChan chan<- bool, config config.Processor, storageClient *storage.Client, storageConfig config.Storage, logger zerolog.Logger) *TransactionsProcessor {
+func NewTransactionsProcessor(ctx context.Context, config config.Processor, storageClient *storage.Client, storageConfig config.Storage, logger zerolog.Logger) *TransactionsProcessor {
 	return &TransactionsProcessor{
 		context:       ctx,
-		recordChan:    recordChan,
-		doneChan:      doneChan,
 		config:        config,
 		storageClient: storageClient,
 		storageConfig: storageConfig,
@@ -147,11 +177,12 @@ func NewTransactionsProcessor(ctx context.Context, recordChan chan<- Record, don
 }
 
 // Process processes the transactions data
-func (t *TransactionsProcessor) Process() error {
-	if err := t.processCSV(); err != nil {
-		return err
+func (t *TransactionsProcessor) Process() (RecordBatcher, error) {
+	records, err := t.processCSV()
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return records, nil
 }
 
 func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (*TransactionRecord, error) {
@@ -173,10 +204,10 @@ func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (
 	return transactionRecord, nil
 }
 
-func (t *TransactionsProcessor) processCSV() error {
+func (t *TransactionsProcessor) processCSV() (RecordBatcher, error) {
 	reader, err := utils.GetGCSReader(t.context, t.storageClient, t.storageConfig.BucketName, t.storageConfig.ObjectPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer reader.Close()
 
@@ -185,15 +216,13 @@ func (t *TransactionsProcessor) processCSV() error {
 	// Skip header
 	header, err := csvReader.Read()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	t.logger.Debug().Msgf("Header: %+v", header)
 
 	var processedRecords []*TransactionRecord
 	var count int
-	defer close(t.doneChan)
-	// TODO: implement batch processing
 	for {
 		record, err := csvReader.Read()
 		if err == io.EOF {
@@ -201,18 +230,18 @@ func (t *TransactionsProcessor) processCSV() error {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		t.logger.Debug().Msgf("Record: %+v", record)
 
 		newRawRecord, err := NewRawTransactionRecord(record)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		newTransactionRecord, err := t.processRawRecord(newRawRecord)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		processedRecords = append(processedRecords, newTransactionRecord)
@@ -226,32 +255,13 @@ func (t *TransactionsProcessor) processCSV() error {
 		count++
 	}
 
-	var wg sync.WaitGroup
 	aggregated := aggregateRecords(processedRecords)
-	for key, record := range aggregated {
-		wg.Add(1)
-		go func(key string, record *AggregatedTransactionRecord) {
-			defer wg.Done()
-			for {
-				select {
-				case t.recordChan <- record:
-					bs, err := json.MarshalIndent(record, "", "  ")
-					if err != nil {
-						t.logger.Error().Err(err).Msg("Error marshalling record")
-					} else {
-						t.logger.Debug().Str("key", key).Msgf("Record: %s", string(bs))
-					}
-					return
-				default:
-					t.logger.Warn().Msgf("Record chan is full")
-					time.Sleep(100 * time.Millisecond)
-				}
-			}
-		}(key, record)
+	var records []*AggregatedTransactionRecord
+	for _, record := range aggregated {
+		records = append(records, record)
 	}
-	wg.Wait()
-	t.doneChan <- true
-	return nil
+
+	return NewTransactionsBatch(records), nil
 }
 
 func aggregateRecords(records []*TransactionRecord) map[string]*AggregatedTransactionRecord {

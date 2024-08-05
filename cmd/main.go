@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"sync"
 
 	"cloud.google.com/go/storage"
 	"github.com/0xpetersatoshi/blockchain-data-aggregator/internal/config"
@@ -38,48 +37,23 @@ func main() {
 	}
 
 	ctx := context.Background()
-	recordChan := make(chan processor.Record, 100)
-	doneChan := make(chan bool)
 	storageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
 	processorConfig := config.NewProcessorConfig(100)
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create storage client")
 	}
-	processor := processor.NewTransactionsProcessor(ctx, recordChan, doneChan, processorConfig, storageClient, storageConfig, logger)
-
-	var wg sync.WaitGroup
-
-	// Start a goroutine to read from the channel
-	wg.Add(1)
-	go func(log zerolog.Logger) {
-		defer wg.Done()
-		for {
-			select {
-			case <-doneChan:
-				return
-			case record, ok := <-recordChan:
-				if !ok {
-					return
-				}
-				loadRecord(record, log)
-			}
-		}
-	}(logger)
+	processor := processor.NewTransactionsProcessor(ctx, processorConfig, storageClient, storageConfig, logger)
 
 	// Start processing
-	if err := processor.Process(); err != nil {
+	batch, err := processor.Process()
+	if err != nil {
 		log.Fatal().Err(err).Msg("failed to process transactions data")
 	}
 
-	// Close the record channel after processing is done
-	close(recordChan)
-	wg.Wait() // Wait for all goroutines to finish
-	logger.Info().Msg("finished processing transactions data")
-}
+	for _, record := range batch.Records() {
+		logger.Info().Msg("record: " + record.Values())
+	}
 
-// loadRecord loads a transaction record into the database
-func loadRecord(record processor.Record, logger zerolog.Logger) {
-	// TODO: implement loading logic
-	logger.Info().Msgf("Processed record: %+v\n", record)
+	logger.Info().Msg("finished processing transactions data")
 }
