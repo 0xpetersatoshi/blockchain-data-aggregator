@@ -91,31 +91,29 @@ func NewRawTransactionRecord(record []string) (*RawTransactionRecord, error) {
 	return newRecord, nil
 }
 
-// TransactionRecord defines the record for the transactions data
+// TransactionRecord defines the individual record for the transactions data
 type TransactionRecord struct {
-	Date                 string
-	ProjectID            string
-	NumberOfTransactions int
-	TotalVolumeUSD       float64
+	Date           string
+	ProjectID      string
+	CurrencySymbol string
+	CurrencyValue  float64
 }
 
-// NewTransactionRecord creates a new TransactionRecord
-func NewTransactionRecord(date string, projectID string, numberOfTransactions int, totalVolumeUSD float64) *TransactionRecord {
-	return &TransactionRecord{
-		Date:                 date,
-		ProjectID:            projectID,
-		NumberOfTransactions: numberOfTransactions,
-		TotalVolumeUSD:       totalVolumeUSD,
-	}
+// AggregatedTransactionRecord defines the aggregated record for the transactions data
+type AggregatedTransactionRecord struct {
+	Date                 string  `json:"date"`
+	ProjectID            string  `json:"project_id"`
+	NumberOfTransactions int     `json:"number_of_transactions"`
+	TotalVolumeUSD       float64 `json:"total_volume_usd"`
 }
 
 // TableName returns the table name
-func (t *TransactionRecord) TableName() string {
+func (t *AggregatedTransactionRecord) TableName() string {
 	return "transactions"
 }
 
 // DBRowEntry returns the database row entry
-func (t *TransactionRecord) DBRowEntry() []interface{} {
+func (t *AggregatedTransactionRecord) DBRowEntry() []interface{} {
 	return []interface{}{
 		t.Date,
 		t.ProjectID,
@@ -171,8 +169,6 @@ func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (
 
 	transactionRecord.Date = ts.Format("2006-01-02")
 	transactionRecord.ProjectID = record.ProjectID
-	transactionRecord.NumberOfTransactions = 1
-	transactionRecord.TotalVolumeUSD = 0
 
 	return transactionRecord, nil
 }
@@ -194,8 +190,8 @@ func (t *TransactionsProcessor) processCSV() error {
 
 	t.logger.Debug().Msgf("Header: %+v", header)
 
+	var processedRecords []*TransactionRecord
 	var count int
-	var wg sync.WaitGroup
 	defer close(t.doneChan)
 	// TODO: implement batch processing
 	for {
@@ -219,31 +215,57 @@ func (t *TransactionsProcessor) processCSV() error {
 			return err
 		}
 
+		processedRecords = append(processedRecords, newTransactionRecord)
+
 		t.logger.Debug().Int("count", count).Msgf("TransactionRecord: %+v", newTransactionRecord)
 
 		if count%100 == 0 {
 			t.logger.Info().Msgf("processed %d records", count)
-			t.logger.Info().Msgf("latest record: %+v", newTransactionRecord)
 		}
 
 		count++
+	}
+
+	var wg sync.WaitGroup
+	aggregated := aggregateRecords(processedRecords)
+	for key, record := range aggregated {
 		wg.Add(1)
-		// Put into channel
-		go func(record *TransactionRecord) {
+		go func(key string, record *AggregatedTransactionRecord) {
 			defer wg.Done()
 			for {
 				select {
 				case t.recordChan <- record:
-					t.logger.Debug().Int("count", count).Msgf("Record sent to channel: %+v", record)
+					bs, err := json.MarshalIndent(record, "", "  ")
+					if err != nil {
+						t.logger.Error().Err(err).Msg("Error marshalling record")
+					} else {
+						t.logger.Debug().Str("key", key).Msgf("Record: %s", string(bs))
+					}
 					return
 				default:
-					t.logger.Warn().Msg("recordChan is full")
+					t.logger.Warn().Msgf("Record chan is full")
 					time.Sleep(100 * time.Millisecond)
 				}
 			}
-		}(newTransactionRecord)
+		}(key, record)
 	}
 	wg.Wait()
 	t.doneChan <- true
 	return nil
+}
+
+func aggregateRecords(records []*TransactionRecord) map[string]*AggregatedTransactionRecord {
+	aggregated := make(map[string]*AggregatedTransactionRecord)
+	for _, record := range records {
+		key := fmt.Sprintf("%s-%s", record.Date, record.ProjectID)
+		if _, ok := aggregated[key]; !ok {
+			aggregated[key] = &AggregatedTransactionRecord{}
+			aggregated[key].Date = record.Date
+			aggregated[key].ProjectID = record.ProjectID
+		}
+		aggregated[key].NumberOfTransactions++
+		// TODO: convert token prices to USD
+		aggregated[key].TotalVolumeUSD += record.CurrencyValue
+	}
+	return aggregated
 }
