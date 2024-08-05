@@ -144,7 +144,8 @@ func (t *TransactionsBatch) NumColumns() int {
 
 // Columns returns the column names of the transactions record
 func (t *TransactionsBatch) Columns() []string {
-	return utils.GetStructFieldNames(t, "sql")
+	s := &AggregatedTransactionRecord{}
+	return utils.GetStructFieldNames(s, "sql")
 }
 
 // Records returns the records
