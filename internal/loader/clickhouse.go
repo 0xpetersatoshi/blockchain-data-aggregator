@@ -65,7 +65,6 @@ func (l *ClickHouse) Load(ctx context.Context, batch processor.RecordBatcher) er
 		valueStrings = append(valueStrings, "("+strings.Join(valueParts, ", ")+")")
 	}
 
-	// TODO: make idempotent
 	// Create the insert statement
 	insertStatement := "INSERT INTO " + batch.TableName() + " (" + strings.Join(batch.Columns(), ", ") + ") VALUES "
 	insertStatement += strings.Join(valueStrings, ", ")
