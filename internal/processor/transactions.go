@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -90,12 +91,18 @@ func NewRawTransactionRecord(record []string) (*RawTransactionRecord, error) {
 	return newRecord, nil
 }
 
+type Token struct {
+	Symbol          string
+	ChainID         string
+	ContractAddress string
+}
+
 // TransactionRecord defines the individual record for the transactions data
 type TransactionRecord struct {
-	Date           string
-	ProjectID      string
-	CurrencySymbol string
-	CurrencyValue  float64
+	Date          string
+	ProjectID     string
+	CurrencyValue float64
+	Token
 }
 
 // AggregatedTransactionRecord defines the aggregated record for the transactions data
@@ -199,13 +206,22 @@ func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (
 		return nil, err
 	}
 
+	currencyValue, err := strconv.ParseFloat(record.Nums.CurrencyValueDecimal, 64)
+	if err != nil {
+		return nil, err
+	}
+
 	transactionRecord.Date = ts.Format("2006-01-02")
 	transactionRecord.ProjectID = record.ProjectID
+	transactionRecord.Symbol = record.Props.CurrencySymbol
+	transactionRecord.CurrencyValue = currencyValue
+	transactionRecord.ChainID = record.Props.ChainID
+	transactionRecord.ContractAddress = record.Props.CurrencyAddress
 
 	return transactionRecord, nil
 }
 
-func (t *TransactionsProcessor) processCSV() (RecordBatcher, error) {
+func (t *TransactionsProcessor) getTransactionRecords() ([]*TransactionRecord, error) {
 	reader, err := utils.GetGCSReader(t.context, t.storageClient, t.storageConfig.BucketName, t.storageConfig.ObjectPath)
 	if err != nil {
 		return nil, err
@@ -256,6 +272,14 @@ func (t *TransactionsProcessor) processCSV() (RecordBatcher, error) {
 		count++
 	}
 
+	return processedRecords, nil
+}
+
+func (t *TransactionsProcessor) processCSV() (RecordBatcher, error) {
+	processedRecords, err := t.getTransactionRecords()
+	if err != nil {
+		return nil, err
+	}
 	aggregated := aggregateRecords(processedRecords)
 	var records []*AggregatedTransactionRecord
 	for _, record := range aggregated {
@@ -279,4 +303,34 @@ func aggregateRecords(records []*TransactionRecord) map[string]*AggregatedTransa
 		aggregated[key].TotalVolumeUSD += record.CurrencyValue
 	}
 	return aggregated
+}
+
+func (t *TransactionsProcessor) GenerateHistoricalTokenPricesMap() (map[string][]Token, error) {
+	records, err := t.getTransactionRecords()
+	if err != nil {
+		return nil, err
+	}
+	return generateUniqueCurrencyMap(records), nil
+}
+
+func generateUniqueCurrencyMap(records []*TransactionRecord) map[string][]Token {
+	// Map to track unique currency symbols for each date
+	dateCurrencyMap := make(map[string]map[string]Token)
+
+	for _, record := range records {
+		if _, ok := dateCurrencyMap[record.Date]; !ok {
+			dateCurrencyMap[record.Date] = make(map[string]Token)
+		}
+		dateCurrencyMap[record.Date][record.Symbol] = Token{Symbol: record.Symbol, ChainID: record.ChainID, ContractAddress: record.ContractAddress}
+	}
+
+	// Convert the map of sets to a map of slices
+	result := make(map[string][]Token)
+	for date, currencySet := range dateCurrencyMap {
+		for _, token := range currencySet {
+			result[date] = append(result[date], token)
+		}
+	}
+
+	return result
 }
