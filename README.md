@@ -93,3 +93,37 @@ docker compose down -v
 ```
 
 This will stop the clickhouse-server and remove all volumes.
+
+## Extra
+
+### Generating Exchange Rate Dataset
+
+In order to run the [script](./cmd/coingecko/generate-historical-exchange-rates-data/main.go) that generates the exchange rate dataset, you will need to set your coingecko api key as an environment variable in a `.env` file.
+
+Copy the provided [`.env.example`](./.env.example) to `.env` and update the `API_KEY` variable with your coingecko api key.
+
+> **Note**: Coingecko segments their API between pro and free accounts. You will likely need to generate an API key from an account on the free tier for this to work as both the base URL and token headers are different depending on whether you are using the pro or free tier.
+
+The script has the following usage instructions:
+
+```bash
+Usage of /var/folders/ft/k09lqv253znb92kr_450_6l00000gn/T/go-build3319112825/b001/exe/main:
+      --debug                       enable debug logging
+      --output-filepath string      output filepath
+      --source-bucket-name string   source bucket name (default "sequence-blockchain-data-aggregator")
+      --source-object-path string   source object path (default "aggregator-data/sample_data.csv")
+```
+
+### Uploading Files to GCP with script
+
+The [script](./scripts/upload_file_to_gcp.go) can be used to upload files to a GCP bucket. You will need to have `gcloud` installed in order to use this script which has the following usage instructions:
+
+```bash
+Usage: ./scripts/upload-file-to-gcp-bucket.sh -f <local_file_path> -b <bucket_name> -d <destination_path> -k <service_account_key_path>
+
+Options:
+  -f  Path to the local CSV file
+  -b  Name of the GCS bucket
+  -d  Destination path in the bucket
+  -k  Path to the service account key JSON file
+```
