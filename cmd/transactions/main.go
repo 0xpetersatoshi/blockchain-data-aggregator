@@ -14,10 +14,12 @@ import (
 )
 
 var (
-	sourceBucketName = pflag.String("source-bucket-name", "sequence-blockchain-data-aggregator", "source bucket name")
-	sourceObjectPath = pflag.String("source-object-path", "aggregator-data/sample_data.csv", "source object path")
-	debug            = pflag.Bool("debug", false, "enable debug logging")
-	dbConnString     = pflag.String("db-conn-string", "clickhouse://default:password@localhost:9000/default", "database connection string")
+	sourceBucketName        = pflag.String("source-bucket-name", "sequence-blockchain-data-aggregator", "source bucket name")
+	sourceObjectPath        = pflag.String("source-object-path", "aggregator-data/sample_data.csv", "source object path")
+	debug                   = pflag.Bool("debug", false, "enable debug logging")
+	dbConnString            = pflag.String("db-conn-string", "clickhouse://default:password@localhost:9000/default", "database connection string")
+	exchangeRatesBucketname = pflag.String("exchange-rates-bucket-name", "sequence-blockchain-data-aggregator", "source bucket name")
+	exchangeRatesObjectPath = pflag.String("exchange-rates-object-path", "coingecko-data/exchange_rates.json", "source object path")
 )
 
 func init() {
@@ -34,18 +36,18 @@ func main() {
 
 	logger.Info().Msgf("source bucket name: %s", *sourceBucketName)
 	logger.Info().Msgf("source object path: %s", *sourceObjectPath)
-	if *sourceBucketName == "" || *sourceObjectPath == "" || *dbConnString == "" {
-		logger.Fatal().Msg("source bucket name, source object path, or db connection string is empty")
+	if *sourceBucketName == "" || *sourceObjectPath == "" || *dbConnString == "" || *exchangeRatesBucketname == "" || *exchangeRatesObjectPath == "" {
+		logger.Fatal().Msg("missing required flags")
 	}
 
 	ctx := context.Background()
-	storageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
-	processorConfig := config.NewProcessorConfig(100)
+	transactionsDataStorageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
+	exchageRatesDataStorageConfig := config.NewStorageConfig(*exchangeRatesBucketname, *exchangeRatesObjectPath)
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create storage client")
 	}
-	processor := processor.NewTransactionsProcessor(ctx, processorConfig, storageClient, storageConfig, logger)
+	processor := processor.NewTransactionsProcessor(ctx, storageClient, transactionsDataStorageConfig, exchageRatesDataStorageConfig, logger, nil)
 
 	// Start processing
 	batch, err := processor.Process()

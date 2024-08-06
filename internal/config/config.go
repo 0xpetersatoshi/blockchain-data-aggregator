@@ -12,15 +12,3 @@ func NewStorageConfig(bucketName, objectPath string) Storage {
 		ObjectPath: objectPath,
 	}
 }
-
-// Processor defines the configuration for the ETL processor
-type Processor struct {
-	BatchSize int
-}
-
-// NewProcessorConfig creates a new Config for an ETL processor
-func NewProcessorConfig(batchSize int) Processor {
-	return Processor{
-		BatchSize: batchSize,
-	}
-}

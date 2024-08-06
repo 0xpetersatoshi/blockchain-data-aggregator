@@ -53,12 +53,13 @@ func main() {
 	}
 
 	storageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
-	processorConfig := config.NewProcessorConfig(100)
 	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create storage client")
 	}
-	processor := processor.NewTransactionsProcessor(ctx, processorConfig, storageClient, storageConfig, logger)
+
+	opts := &processor.Options{SkipExchangeRateConversion: true}
+	processor := processor.NewTransactionsProcessor(ctx, storageClient, storageConfig, config.Storage{}, logger, opts)
 	m, err := processor.GenerateHistoricalTokenPricesMap()
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to generate historical token price map")

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"reflect"
 	"strconv"
 	"time"
@@ -99,9 +100,9 @@ type Token struct {
 
 // TransactionRecord defines the individual record for the transactions data
 type TransactionRecord struct {
-	Date          string
-	ProjectID     string
-	CurrencyValue float64
+	Date             string
+	ProjectID        string
+	CurrencyValueUSD float64
 	Token
 }
 
@@ -164,28 +165,46 @@ func (t *TransactionsBatch) Records() []Record {
 	return records
 }
 
+type Options struct {
+	SkipExchangeRateConversion bool
+}
+
 // TransactionsProcessor defines the ETL processor for the transactions data
 type TransactionsProcessor struct {
-	context       context.Context
-	config        config.Processor
-	storageClient *storage.Client
-	storageConfig config.Storage
-	logger        zerolog.Logger
+	context                        context.Context
+	storageClient                  *storage.Client
+	TransactionsDataStorageConfig  config.Storage
+	exchangeRatesDataStorageConfig config.Storage
+	logger                         zerolog.Logger
+	exchangeRatesData              map[string]map[string]float64
+	options                        *Options
 }
 
 // NewTransactionsProcessor creates a new TransactionsProcessor
-func NewTransactionsProcessor(ctx context.Context, config config.Processor, storageClient *storage.Client, storageConfig config.Storage, logger zerolog.Logger) *TransactionsProcessor {
+func NewTransactionsProcessor(ctx context.Context, storageClient *storage.Client, storageConfig config.Storage, exchangeRatesStorageConfig config.Storage, logger zerolog.Logger, options *Options) *TransactionsProcessor {
+	if options == nil {
+		options = &Options{}
+	}
 	return &TransactionsProcessor{
-		context:       ctx,
-		config:        config,
-		storageClient: storageClient,
-		storageConfig: storageConfig,
-		logger:        logger,
+		context:                        ctx,
+		storageClient:                  storageClient,
+		TransactionsDataStorageConfig:  storageConfig,
+		exchangeRatesDataStorageConfig: exchangeRatesStorageConfig,
+		exchangeRatesData:              make(map[string]map[string]float64),
+		logger:                         logger,
+		options:                        options,
 	}
 }
 
 // Process processes the transactions data
 func (t *TransactionsProcessor) Process() (RecordBatcher, error) {
+	if t.options != nil && t.options.SkipExchangeRateConversion {
+		t.logger.Info().Msg("Skipping exchange rate conversion")
+	} else {
+		if err := t.getExchangeRatesData(); err != nil {
+			return nil, err
+		}
+	}
 	records, err := t.processCSV()
 	if err != nil {
 		return nil, err
@@ -193,10 +212,29 @@ func (t *TransactionsProcessor) Process() (RecordBatcher, error) {
 	return records, nil
 }
 
-func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (*TransactionRecord, error) {
-	// TODO: flatten and parse data into TransactionRecord
-	// TODO: convert token prices using coin gecko api data
+func (t *TransactionsProcessor) getExchangeRatesData() error {
+	reader, err := utils.GetGCSReader(t.context, t.storageClient, t.exchangeRatesDataStorageConfig.BucketName, t.exchangeRatesDataStorageConfig.ObjectPath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
 
+	// Read the file contents
+	bytes, err := io.ReadAll(reader)
+	if err != nil {
+		log.Fatalf("Failed to read file: %v", err)
+	}
+
+	// Unmarshal the JSON data into the map
+	err = json.Unmarshal(bytes, &t.exchangeRatesData)
+	if err != nil {
+		log.Fatalf("Failed to unmarshal JSON: %v", err)
+	}
+
+	return nil
+}
+
+func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (*TransactionRecord, error) {
 	const layout = "2006-01-02 15:04:05.000"
 
 	transactionRecord := &TransactionRecord{}
@@ -206,15 +244,27 @@ func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (
 		return nil, err
 	}
 
-	currencyValue, err := strconv.ParseFloat(record.Nums.CurrencyValueDecimal, 64)
+	formattedDate := ts.Format("2006-01-02")
+
+	currencyValueDecimal, err := strconv.ParseFloat(record.Nums.CurrencyValueDecimal, 64)
 	if err != nil {
 		return nil, err
 	}
 
-	transactionRecord.Date = ts.Format("2006-01-02")
+	var USDValue float64
+	if t.options != nil && !t.options.SkipExchangeRateConversion {
+		exchangeRate, found := t.exchangeRatesData[formattedDate][record.Props.CurrencySymbol]
+		if !found {
+			// TODO: fetch/update exchange rates when existing data is missing
+			return nil, fmt.Errorf("exchange rate not found for date '%s' and currency '%s'", formattedDate, record.Props.CurrencySymbol)
+		}
+		USDValue = currencyValueDecimal * exchangeRate
+	}
+
+	transactionRecord.Date = formattedDate
 	transactionRecord.ProjectID = record.ProjectID
 	transactionRecord.Symbol = record.Props.CurrencySymbol
-	transactionRecord.CurrencyValue = currencyValue
+	transactionRecord.CurrencyValueUSD = USDValue
 	transactionRecord.ChainID = record.Props.ChainID
 	transactionRecord.ContractAddress = record.Props.CurrencyAddress
 
@@ -222,7 +272,7 @@ func (t *TransactionsProcessor) processRawRecord(record *RawTransactionRecord) (
 }
 
 func (t *TransactionsProcessor) getTransactionRecords() ([]*TransactionRecord, error) {
-	reader, err := utils.GetGCSReader(t.context, t.storageClient, t.storageConfig.BucketName, t.storageConfig.ObjectPath)
+	reader, err := utils.GetGCSReader(t.context, t.storageClient, t.TransactionsDataStorageConfig.BucketName, t.TransactionsDataStorageConfig.ObjectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -299,8 +349,7 @@ func aggregateRecords(records []*TransactionRecord) map[string]*AggregatedTransa
 			aggregated[key].ProjectID = record.ProjectID
 		}
 		aggregated[key].NumberOfTransactions++
-		// TODO: convert token prices to USD
-		aggregated[key].TotalVolumeUSD += record.CurrencyValue
+		aggregated[key].TotalVolumeUSD += record.CurrencyValueUSD
 	}
 	return aggregated
 }
