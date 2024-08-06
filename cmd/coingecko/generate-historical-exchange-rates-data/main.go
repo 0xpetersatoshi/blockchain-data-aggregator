@@ -15,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/rs/zerolog"
 	"github.com/spf13/pflag"
+	"google.golang.org/api/option"
 )
 
 var (
@@ -53,7 +54,7 @@ func main() {
 	}
 
 	storageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
-	storageClient, err := storage.NewClient(ctx)
+	storageClient, err := storage.NewClient(ctx, option.WithoutAuthentication())
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create storage client")
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/pflag"
+	"google.golang.org/api/option"
 )
 
 var (
@@ -43,7 +44,7 @@ func main() {
 	ctx := context.Background()
 	transactionsDataStorageConfig := config.NewStorageConfig(*sourceBucketName, *sourceObjectPath)
 	exchageRatesDataStorageConfig := config.NewStorageConfig(*exchangeRatesBucketname, *exchangeRatesObjectPath)
-	storageClient, err := storage.NewClient(ctx)
+	storageClient, err := storage.NewClient(ctx, option.WithoutAuthentication())
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create storage client")
 	}

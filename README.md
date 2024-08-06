@@ -23,6 +23,7 @@ Required:
 
 - [`go`](https://go.dev/dl/) version `1.21` or higher
 - [`docker`](https://docs.docker.com/get-docker/) version 20.10 or higher
+- [`docker-compose`](https://docs.docker.com/compose/install/): This is usually now bundled with docker but not always the case on linux
 
 Optional:
 
